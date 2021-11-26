@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
+	stdlog "log"
 	"net/http"
 	"os"
 	"runtime"
@@ -16,10 +17,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var log = stdlog.New(os.Stdout, "[main] ", stdlog.LstdFlags|stdlog.Lshortfile|stdlog.Lmsgprefix)
+
 func main() {
 	upgrader := websocket.Upgrader{
 		EnableCompression: true,
 		HandshakeTimeout:  time.Second * 15,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
 		Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
 			w.WriteHeader(status)
 			log.Printf("error in ws: %+v", reason)
@@ -88,7 +94,7 @@ func main() {
 
 	token := os.Getenv("TINKOFF_TOKEN")
 	rest := tinkoff.NewSandboxRestClient(token)
-	stream, err := tinkoff.NewStreamingClient(log.Default(), token)
+	stream, err := tinkoff.NewStreamingClient(log, token)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -100,21 +106,25 @@ func main() {
 		if err = stream.RunReadLoop(func(event interface{}) error {
 			switch event := event.(type) {
 			case tinkoff.OrderBookEvent:
+				instrument := instrumentsByFIGI[event.OrderBook.FIGI]
+
 				if len(event.OrderBook.Bids) == 0 || len(event.OrderBook.Asks) == 0 {
-					log.Fatalf("exchange is closed for ticker %s", instrumentsByFIGI[event.OrderBook.FIGI].Ticker)
+					log.Printf("no bids/asks for ticker %s (is exchange closed for ticker?)", instrument.Ticker)
+					return nil
 				}
 
 				updates <- internal.Update{
 					Time:   event.Time,
-					Name:   instrumentsByFIGI[event.OrderBook.FIGI].Name,
-					Ticker: instrumentsByFIGI[event.OrderBook.FIGI].Ticker,
+					Name:   instrument.Name,
+					Ticker: instrument.Ticker,
 					Cost: internal.Cost{
-						Low:  event.OrderBook.Bids[0][0],
-						High: event.OrderBook.Asks[0][0],
+						Low:      event.OrderBook.Bids[0][0],
+						High:     event.OrderBook.Asks[0][0],
+						Currency: instrument.Currency,
 					},
 				}
 			default:
-				log.Fatalf("unknown event %+v", event)
+				return fmt.Errorf("unknown event %v", event)
 			}
 
 			return nil
