@@ -92,7 +92,7 @@ func main() {
 
 	go startBroadcast(&subscribers, updates)
 
-	token := os.Getenv("TINKOFF_TOKEN")
+	token := os.Getenv("TOKEN")
 	rest := tinkoff.NewSandboxRestClient(token)
 	stream, err := tinkoff.NewStreamingClient(log, token)
 	if err != nil {
