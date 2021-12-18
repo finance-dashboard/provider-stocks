@@ -12,8 +12,15 @@ type Subscriber struct {
 }
 
 type SubscriberList struct {
-	data []Subscriber
+	data map[Subscriber]struct{}
 	m    sync.RWMutex
+}
+
+func NewSubscriberList() *SubscriberList {
+	return &SubscriberList{
+		data: make(map[Subscriber]struct{}),
+		m:    sync.RWMutex{},
+	}
 }
 
 func (l *SubscriberList) Subscribe() Subscriber {
@@ -24,7 +31,7 @@ func (l *SubscriberList) Subscribe() Subscriber {
 
 	l.m.Lock()
 	defer l.m.Unlock()
-	l.data = append(l.data, subscriber)
+	l.data[subscriber] = struct{}{}
 
 	return subscriber
 }
@@ -32,20 +39,23 @@ func (l *SubscriberList) Subscribe() Subscriber {
 func (l *SubscriberList) Unsubscribe(s Subscriber) {
 	l.m.Lock()
 	defer l.m.Unlock()
-
-	for i := 0; i < len(l.data); i++ {
-		if l.data[i].ID == s.ID {
-			l.data = append(l.data[:i], l.data[i+1:]...)
-			return
-		}
-	}
+	delete(l.data, s)
 }
 
 func (l *SubscriberList) Snapshot() []Subscriber {
 	l.m.RLock()
 	defer l.m.RUnlock()
 
-	data := make([]Subscriber, len(l.data))
-	copy(data, l.data)
-	return data
+	snapshot := make([]Subscriber, 0, len(l.data))
+	for v := range l.data {
+		snapshot = append(snapshot, v)
+	}
+
+	return snapshot
+}
+
+func (l *SubscriberList) Len() int {
+	l.m.RLock()
+	defer l.m.RUnlock()
+	return len(l.data)
 }
