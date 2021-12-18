@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package finance_dashboard;
+
+option go_package = "github.com/finance-dashboard/provider-stocks/api;api";
+
+message TimeSlice {
+    // start and end must be in ISO format
+    string start = 1;
+    string end = 2;
+    string currencyCode = 3;
+}
+
+message Value {
+    float value = 1;
+}
+
+service CurrencyProvider {
+    rpc GetCurrency(TimeSlice) returns (stream Value) {}
+}

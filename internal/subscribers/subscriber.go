@@ -1,32 +1,34 @@
-package internal
+package subscribers
 
 import (
 	"sync"
+
+	"finance-dashboard-provider-stocks/internal/update"
 
 	uuid "github.com/satori/go.uuid"
 )
 
 type Subscriber struct {
 	ID      uuid.UUID
-	Updates chan Update
+	Updates chan update.Update
 }
 
-type SubscriberList struct {
+type Subscribers struct {
 	data map[Subscriber]struct{}
 	m    sync.RWMutex
 }
 
-func NewSubscriberList() *SubscriberList {
-	return &SubscriberList{
+func New() *Subscribers {
+	return &Subscribers{
 		data: make(map[Subscriber]struct{}),
 		m:    sync.RWMutex{},
 	}
 }
 
-func (l *SubscriberList) Subscribe() Subscriber {
+func (l *Subscribers) Subscribe() Subscriber {
 	subscriber := Subscriber{
 		ID:      uuid.NewV4(),
-		Updates: make(chan Update, 10),
+		Updates: make(chan update.Update, 10),
 	}
 
 	l.m.Lock()
@@ -36,13 +38,13 @@ func (l *SubscriberList) Subscribe() Subscriber {
 	return subscriber
 }
 
-func (l *SubscriberList) Unsubscribe(s Subscriber) {
+func (l *Subscribers) Unsubscribe(s Subscriber) {
 	l.m.Lock()
 	defer l.m.Unlock()
 	delete(l.data, s)
 }
 
-func (l *SubscriberList) Snapshot() []Subscriber {
+func (l *Subscribers) Snapshot() []Subscriber {
 	l.m.RLock()
 	defer l.m.RUnlock()
 
@@ -54,7 +56,7 @@ func (l *SubscriberList) Snapshot() []Subscriber {
 	return snapshot
 }
 
-func (l *SubscriberList) Len() int {
+func (l *Subscribers) Len() int {
 	l.m.RLock()
 	defer l.m.RUnlock()
 	return len(l.data)

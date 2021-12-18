@@ -5,16 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	stdlog "log"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 
-	"finance-dashboard-provider-stocks/internal"
+	"finance-dashboard-provider-stocks/api"
+	"finance-dashboard-provider-stocks/internal/cache"
+	"finance-dashboard-provider-stocks/internal/grpcserver"
+	"finance-dashboard-provider-stocks/internal/subscribers"
+	"finance-dashboard-provider-stocks/internal/update"
 
 	tinkoff "github.com/TinkoffCreditSystems/invest-openapi-go-sdk"
 	"github.com/gorilla/websocket"
+	"google.golang.org/grpc"
 )
 
 var log = stdlog.New(os.Stdout, "[main] ", stdlog.LstdFlags|stdlog.Lshortfile|stdlog.Lmsgprefix)
@@ -32,13 +38,13 @@ func main() {
 		},
 	}
 
-	updates := make(chan internal.Update)
-	subscribers := internal.NewSubscriberList()
+	updates := make(chan update.Update)
+	subs := subscribers.New()
 
-	go startBroadcast(subscribers, updates)
+	go startBroadcast(subs, updates)
 
 	token := os.Getenv("TOKEN")
-	rest := tinkoff.NewSandboxRestClient(token)
+	rest := tinkoff.NewSandboxRestClient(token).RestClient // We don't need features of sandbox rest client.
 	stream, err := tinkoff.NewStreamingClient(log, token)
 	if err != nil {
 		log.Fatal(err)
@@ -47,17 +53,17 @@ func main() {
 	tickers := strings.Split(os.Getenv("TICKERS"), ";")
 	instrumentsByFIGI, _ := collectInstrumentsInfo(rest, tickers)
 
-	cache, err := populateCache(rest, instrumentsByFIGI)
+	c, err := populateCache(rest, instrumentsByFIGI)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	cacheSubscriber := subscribers.Subscribe()
-	defer subscribers.Unsubscribe(cacheSubscriber)
+	cacheSubscriber := subs.Subscribe()
+	defer subs.Unsubscribe(cacheSubscriber)
 
 	go func() {
-		for update := range cacheSubscriber.Updates {
-			cache.Set(update)
+		for u := range cacheSubscriber.Updates {
+			c.Set(u)
 		}
 	}()
 
@@ -72,21 +78,39 @@ func main() {
 	go func() {
 		for {
 			time.Sleep(time.Second * 15)
-			log.Printf("goroutines: %d, subscribers: %d", runtime.NumGoroutine(), subscribers.Len())
+			log.Printf("goroutines: %d, subscribers: %d", runtime.NumGoroutine(), subs.Len())
 		}
 	}()
 
+	go listenAndServeGRPC(rest, instrumentsByFIGI)
+	listenAndServeHTTP(upgrader, subs, c)
+}
+
+func listenAndServeGRPC(rest *tinkoff.RestClient, instruments InstrumentMap) {
+	lis, err := net.Listen("tcp", ":8082")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	server := grpc.NewServer()
+	server.RegisterService(&api.CurrencyProvider_ServiceDesc, grpcserver.New(rest, instruments))
+
+	log.Printf("grpc: listening on port 8082")
+	log.Fatal(server.Serve(lis))
+}
+
+func listenAndServeHTTP(upgrader websocket.Upgrader, subs *subscribers.Subscribers, c *cache.Cache) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/stocks", handleIncomingReq(upgrader, subscribers, cache))
+	mux.HandleFunc("/api/v1/stocks", HandleIncomingReq(upgrader, subs, c))
 
 	server := http.Server{Addr: ":8081", Handler: mux}
 
-	log.Printf("listening on port 8081")
+	log.Printf("http: listening on port 8081")
 	log.Fatal(server.ListenAndServe())
 }
 
-func populateCache(rest *tinkoff.SandboxRestClient, instrumentsByFIGI InstrumentMap) (*internal.Cache, error) {
-	cache := internal.NewCache()
+func populateCache(rest *tinkoff.RestClient, instrumentsByFIGI InstrumentMap) (*cache.Cache, error) {
+	c := cache.New()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -104,11 +128,11 @@ func populateCache(rest *tinkoff.SandboxRestClient, instrumentsByFIGI Instrument
 
 		lastCandle := candles[len(candles)-1]
 
-		cache.Set(internal.Update{
+		c.Set(update.Update{
 			Time:   lastCandle.TS,
 			Name:   instrument.Name,
 			Ticker: instrument.Ticker,
-			Cost: internal.Cost{
+			Cost: update.Cost{
 				Low:      lastCandle.ClosePrice,
 				High:     lastCandle.ClosePrice,
 				Currency: instrument.Currency,
@@ -116,10 +140,10 @@ func populateCache(rest *tinkoff.SandboxRestClient, instrumentsByFIGI Instrument
 		})
 	}
 
-	return cache, nil
+	return c, nil
 }
 
-func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI InstrumentMap, updates chan internal.Update) {
+func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI InstrumentMap, updates chan update.Update) {
 	if err := stream.RunReadLoop(func(event interface{}) error {
 		switch event := event.(type) {
 		case tinkoff.OrderBookEvent:
@@ -130,11 +154,11 @@ func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI Instru
 				return nil
 			}
 
-			updates <- internal.Update{
+			updates <- update.Update{
 				Time:   event.Time,
 				Name:   instrument.Name,
 				Ticker: instrument.Ticker,
-				Cost: internal.Cost{
+				Cost: update.Cost{
 					Low:      event.OrderBook.Bids[0][0],
 					High:     event.OrderBook.Asks[0][0],
 					Currency: instrument.Currency,
@@ -150,7 +174,7 @@ func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI Instru
 	}
 }
 
-func handleIncomingReq(upgrader websocket.Upgrader, subscribers *internal.SubscriberList, cache *internal.Cache) func(w http.ResponseWriter, r *http.Request) {
+func HandleIncomingReq(upgrader websocket.Upgrader, subscribers *subscribers.Subscribers, cache *cache.Cache) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("client subscribed")
 
@@ -164,8 +188,8 @@ func handleIncomingReq(upgrader websocket.Upgrader, subscribers *internal.Subscr
 			_ = conn.Close()
 		}()
 
-		for _, update := range cache.Snapshot() {
-			if ok := sendUpdate(conn, update); !ok {
+		for _, u := range cache.Snapshot() {
+			if ok := sendUpdate(conn, u); !ok {
 				return
 			}
 		}
@@ -179,8 +203,8 @@ func handleIncomingReq(upgrader websocket.Upgrader, subscribers *internal.Subscr
 		go func() {
 			for {
 				select {
-				case update := <-subscriber.Updates:
-					if ok := sendUpdate(conn, update); !ok {
+				case u := <-subscriber.Updates:
+					if ok := sendUpdate(conn, u); !ok {
 						return
 					}
 				case <-ctx.Done():
@@ -207,7 +231,7 @@ func handleIncomingReq(upgrader websocket.Upgrader, subscribers *internal.Subscr
 	}
 }
 
-func sendUpdate(conn *websocket.Conn, update internal.Update) bool {
+func sendUpdate(conn *websocket.Conn, update update.Update) bool {
 	b, err := json.Marshal(update)
 	if err != nil {
 		log.Print(err)
@@ -222,7 +246,7 @@ func sendUpdate(conn *websocket.Conn, update internal.Update) bool {
 
 type InstrumentMap = map[string]tinkoff.Instrument
 
-func collectInstrumentsInfo(rest *tinkoff.SandboxRestClient, tickers []string) (byFIGI InstrumentMap, byTickers InstrumentMap) {
+func collectInstrumentsInfo(rest *tinkoff.RestClient, tickers []string) (byFIGI InstrumentMap, byTickers InstrumentMap) {
 	byFIGI = make(InstrumentMap)
 	byTickers = make(InstrumentMap)
 
@@ -245,13 +269,13 @@ func collectInstrumentsInfo(rest *tinkoff.SandboxRestClient, tickers []string) (
 	return
 }
 
-func startBroadcast(subscribers *internal.SubscriberList, updates <-chan internal.Update) {
+func startBroadcast(subscribers *subscribers.Subscribers, updates <-chan update.Update) {
 	for {
-		update := <-updates
+		u := <-updates
 
 		snapshot := subscribers.Snapshot()
 		for _, item := range snapshot {
-			item.Updates <- update
+			item.Updates <- u
 		}
 	}
 }
