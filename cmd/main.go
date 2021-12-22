@@ -38,10 +38,12 @@ func main() {
 		},
 	}
 
-	updates := make(chan update.Update)
+	updates := make(chan update.Update, 10)
 	subs := subscribers.New()
 
 	go startBroadcast(subs, updates)
+
+	log.Printf("started broadcasting to subscribers")
 
 	token := os.Getenv("TOKEN")
 	rest := tinkoff.NewSandboxRestClient(token).RestClient // We don't need features of sandbox rest client.
@@ -58,6 +60,8 @@ func main() {
 		log.Fatal(err)
 	}
 
+	log.Printf("populated cache")
+
 	cacheSubscriber := subs.Subscribe()
 	defer subs.Unsubscribe(cacheSubscriber)
 
@@ -67,13 +71,17 @@ func main() {
 		}
 	}()
 
-	go readEventsFromAPI(stream, instrumentsByFIGI, updates)
+	go processEventsFromAPI(stream, instrumentsByFIGI, updates)
+
+	log.Printf("started processing events from API")
 
 	for figi := range instrumentsByFIGI {
 		if err := stream.SubscribeOrderbook(figi, 1, ""); err != nil {
 			log.Fatal(err)
 		}
 	}
+
+	log.Printf("subscribed to orderbooks %v", instrumentsByFIGI)
 
 	go func() {
 		for {
@@ -143,7 +151,7 @@ func populateCache(rest *tinkoff.RestClient, instrumentsByFIGI InstrumentMap) (*
 	return c, nil
 }
 
-func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI InstrumentMap, updates chan update.Update) {
+func processEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI InstrumentMap, updates chan update.Update) {
 	if err := stream.RunReadLoop(func(event interface{}) error {
 		switch event := event.(type) {
 		case tinkoff.OrderBookEvent:
@@ -154,7 +162,10 @@ func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI Instru
 				return nil
 			}
 
-			updates <- update.Update{
+			log.Printf("got event for %s", event.Name)
+
+			select {
+			case updates <- update.Update{
 				Time:   event.Time,
 				Name:   instrument.Name,
 				Ticker: instrument.Ticker,
@@ -163,6 +174,9 @@ func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI Instru
 					High:     event.OrderBook.Asks[0][0],
 					Currency: instrument.Currency,
 				},
+			}:
+			default:
+				log.Printf("skipped event from API: updates channel is full")
 			}
 		default:
 			return fmt.Errorf("unknown event %v", event)
@@ -177,6 +191,7 @@ func readEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI Instru
 func HandleIncomingReq(upgrader websocket.Upgrader, subscribers *subscribers.Subscribers, cache *cache.Cache) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("client subscribed")
+		defer log.Printf("client unsubscribed")
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -275,7 +290,11 @@ func startBroadcast(subscribers *subscribers.Subscribers, updates <-chan update.
 
 		snapshot := subscribers.Snapshot()
 		for _, item := range snapshot {
-			item.Updates <- u
+			select {
+			case item.Updates <- u:
+			default:
+				log.Printf("skipped sending info to subscriber: channel is full")
+			}
 		}
 	}
 }
