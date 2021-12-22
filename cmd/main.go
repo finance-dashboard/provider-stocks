@@ -81,7 +81,7 @@ func main() {
 		}
 	}
 
-	log.Printf("subscribed to orderbooks %v", instrumentsByFIGI)
+	log.Printf("subscribed to orderbooks %v", tickers)
 
 	go func() {
 		for {
@@ -161,8 +161,6 @@ func processEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI Ins
 				log.Printf("no bids/asks for ticker %s (is exchange closed for ticker?)", instrument.Ticker)
 				return nil
 			}
-
-			log.Printf("got event for %s", event.Name)
 
 			select {
 			case updates <- update.Update{
