@@ -152,37 +152,39 @@ func populateCache(rest *tinkoff.RestClient, instrumentsByFIGI InstrumentMap) (*
 }
 
 func processEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI InstrumentMap, updates chan update.Update) {
-	if err := stream.RunReadLoop(func(event interface{}) error {
-		switch event := event.(type) {
-		case tinkoff.OrderBookEvent:
-			instrument := instrumentsByFIGI[event.OrderBook.FIGI]
+	for {
+		if err := stream.RunReadLoop(func(event interface{}) error {
+			switch event := event.(type) {
+			case tinkoff.OrderBookEvent:
+				instrument := instrumentsByFIGI[event.OrderBook.FIGI]
 
-			if len(event.OrderBook.Bids) == 0 || len(event.OrderBook.Asks) == 0 {
-				log.Printf("no bids/asks for ticker %s (is exchange closed for ticker?)", instrument.Ticker)
-				return nil
-			}
+				if len(event.OrderBook.Bids) == 0 || len(event.OrderBook.Asks) == 0 {
+					log.Printf("no bids/asks for ticker %s (is exchange closed for ticker?)", instrument.Ticker)
+					return nil
+				}
 
-			select {
-			case updates <- update.Update{
-				Time:   event.Time,
-				Name:   instrument.Name,
-				Ticker: instrument.Ticker,
-				Cost: update.Cost{
-					Low:      event.OrderBook.Bids[0][0],
-					High:     event.OrderBook.Asks[0][0],
-					Currency: instrument.Currency,
-				},
-			}:
+				select {
+				case updates <- update.Update{
+					Time:   event.Time,
+					Name:   instrument.Name,
+					Ticker: instrument.Ticker,
+					Cost: update.Cost{
+						Low:      event.OrderBook.Bids[0][0],
+						High:     event.OrderBook.Asks[0][0],
+						Currency: instrument.Currency,
+					},
+				}:
+				default:
+					log.Printf("skipped event from API: updates channel is full")
+				}
 			default:
-				log.Printf("skipped event from API: updates channel is full")
+				return fmt.Errorf("unknown event %v", event)
 			}
-		default:
-			return fmt.Errorf("unknown event %v", event)
-		}
 
-		return nil
-	}); err != nil {
-		log.Fatal(err)
+			return nil
+		}); err != nil {
+			log.Printf("error running read loop: %v", err)
+		}
 	}
 }
 
