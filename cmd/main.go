@@ -53,7 +53,7 @@ func main() {
 	}
 
 	tickers := strings.Split(os.Getenv("TICKERS"), ";")
-	instrumentsByFIGI, _ := collectInstrumentsInfo(rest, tickers)
+	instrumentsByFIGI, instrumentsByTickers := collectInstrumentsInfo(rest, tickers)
 
 	c, err := populateCache(rest, instrumentsByFIGI)
 	if err != nil {
@@ -90,7 +90,7 @@ func main() {
 		}
 	}()
 
-	go listenAndServeGRPC(rest, instrumentsByFIGI)
+	go listenAndServeGRPC(rest, instrumentsByTickers)
 	listenAndServeHTTP(upgrader, subs, c)
 }
 
