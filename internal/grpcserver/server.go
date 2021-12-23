@@ -47,7 +47,7 @@ func (s CurrencyProvider) GetCurrency(slice *api.TimeSlice, server api.CurrencyP
 	}
 
 	for _, value := range values {
-		if err := server.SendMsg(value.ClosePrice); err != nil {
+		if err := server.Send(&api.Value{Value: float32(value.ClosePrice)}); err != nil {
 			return err
 		}
 	}
