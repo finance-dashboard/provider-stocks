@@ -1,4 +1,4 @@
-IMAGE=docker.io/iskorotkov/finance-dashboard-provider-stocks:v0.1.0
+IMAGE=docker.io/iskorotkov/finance-dashboard-provider-stocks:v0.1.1
 
 build-dev:
 	docker build -f build/dev.dockerfile -t $(IMAGE)-dev .

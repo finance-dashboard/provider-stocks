@@ -47,10 +47,6 @@ func main() {
 
 	token := os.Getenv("TOKEN")
 	rest := tinkoff.NewSandboxRestClient(token).RestClient // We don't need features of sandbox rest client.
-	stream, err := tinkoff.NewStreamingClient(log, token)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	tickers := strings.Split(os.Getenv("TICKERS"), ";")
 	instrumentsByFIGI, instrumentsByTickers := collectInstrumentsInfo(rest, tickers)
@@ -71,17 +67,26 @@ func main() {
 		}
 	}()
 
-	go processEventsFromAPI(stream, instrumentsByFIGI, updates)
+	go func() {
+		for {
+			stream, err := tinkoff.NewStreamingClient(log, token)
+			if err != nil {
+				log.Fatal(err)
+			}
 
-	log.Printf("started processing events from API")
+			for figi := range instrumentsByFIGI {
+				if err := stream.SubscribeOrderbook(figi, 1, ""); err != nil {
+					log.Fatal(err)
+				}
+			}
+			log.Printf("subscribed to orderbooks %v", tickers)
 
-	for figi := range instrumentsByFIGI {
-		if err := stream.SubscribeOrderbook(figi, 1, ""); err != nil {
-			log.Fatal(err)
+			log.Printf("starting processing events from API")
+			processEventsFromAPI(stream, instrumentsByFIGI, updates)
+
+			time.Sleep(time.Second)
 		}
-	}
-
-	log.Printf("subscribed to orderbooks %v", tickers)
+	}()
 
 	go func() {
 		for {
@@ -152,39 +157,37 @@ func populateCache(rest *tinkoff.RestClient, instrumentsByFIGI InstrumentMap) (*
 }
 
 func processEventsFromAPI(stream *tinkoff.StreamingClient, instrumentsByFIGI InstrumentMap, updates chan update.Update) {
-	for {
-		if err := stream.RunReadLoop(func(event interface{}) error {
-			switch event := event.(type) {
-			case tinkoff.OrderBookEvent:
-				instrument := instrumentsByFIGI[event.OrderBook.FIGI]
+	if err := stream.RunReadLoop(func(event interface{}) error {
+		switch event := event.(type) {
+		case tinkoff.OrderBookEvent:
+			instrument := instrumentsByFIGI[event.OrderBook.FIGI]
 
-				if len(event.OrderBook.Bids) == 0 || len(event.OrderBook.Asks) == 0 {
-					log.Printf("no bids/asks for ticker %s (is exchange closed for ticker?)", instrument.Ticker)
-					return nil
-				}
-
-				select {
-				case updates <- update.Update{
-					Time:   event.Time,
-					Name:   instrument.Name,
-					Ticker: instrument.Ticker,
-					Cost: update.Cost{
-						Low:      event.OrderBook.Bids[0][0],
-						High:     event.OrderBook.Asks[0][0],
-						Currency: instrument.Currency,
-					},
-				}:
-				default:
-					log.Printf("skipped event from API: updates channel is full")
-				}
-			default:
-				return fmt.Errorf("unknown event %v", event)
+			if len(event.OrderBook.Bids) == 0 || len(event.OrderBook.Asks) == 0 {
+				log.Printf("no bids/asks for ticker %s (is exchange closed for ticker?)", instrument.Ticker)
+				return nil
 			}
 
-			return nil
-		}); err != nil {
-			log.Printf("error running read loop: %v", err)
+			select {
+			case updates <- update.Update{
+				Time:   event.Time,
+				Name:   instrument.Name,
+				Ticker: instrument.Ticker,
+				Cost: update.Cost{
+					Low:      event.OrderBook.Bids[0][0],
+					High:     event.OrderBook.Asks[0][0],
+					Currency: instrument.Currency,
+				},
+			}:
+			default:
+				log.Printf("skipped event from API: updates channel is full")
+			}
+		default:
+			return fmt.Errorf("unknown event %v", event)
 		}
+
+		return nil
+	}); err != nil {
+		log.Printf("error running read loop: %v", err)
 	}
 }
 
